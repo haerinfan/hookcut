@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const git=args=>execFileSync('git',args,{cwd:root,windowsHide:true,maxBuffer:16*1024*1024});
 const files=git(['ls-files','-z']).toString().split('\0').filter(Boolean);
-const allowedRoot=new Set(['.gitignore','.gitattributes','package.json','server.mjs','launcher.mjs','Start-Hookcut.cmd','Stop-Hookcut.cmd','README.md','QA.md','SECURITY.md','LICENSE']);
+const allowedRoot=new Set(['.gitignore','.gitattributes','AGENTS.md','package.json','server.mjs','launcher.mjs','Start-Hookcut.cmd','Stop-Hookcut.cmd','README.md','QA.md','SECURITY.md','LICENSE']);
 const allowedDirectory=/^(?:lib|public|tests|scripts|docs|\.github\/workflows|\.githooks)\//;
 const sampleFiles=new Set(['samples/practice.mp4','samples/practice.srt','samples/speech-demo.mp4']);
 const binaryFiles=new Set(['samples/practice.mp4','samples/speech-demo.mp4','docs/captioned-export.png']);
