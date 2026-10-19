@@ -116,7 +116,7 @@ Text-entry fields keep their normal keyboard behavior.
 
 All app data is stored beside the app in **.data/**:
 
-- `library.json`: hooks, source metadata, and export history.
+- `library.json`: hooks, source metadata, saved moments, export presets, batch request records, and export history.
 - `videos/`: imported source copies and parsed subtitle files.
 - `exports/`: generated MP4s and rendering support files.
 - `models/`: the verified local speech model.
@@ -127,7 +127,7 @@ The studio remembers the current source and editing settings in your browser's l
 
 For a complete backup, stop Hookcut and copy the whole app folder, including `.data`. A hook JSON backup contains only hooks, not videos or clip files. Do not delete `.data` if you want to keep your work.
 
-Removing a source deletes only its imported copy. Completed exports remain downloadable, but failed exports cannot be retried after their source has been removed. Removing an export deletes its generated file. These actions ask for confirmation inside the app.
+Removing a source deletes its imported copy, attached captions, and saved moments. Your original file stays unchanged. Completed exports remain downloadable, but failed exports cannot be retried after their source has been removed. Removing an export deletes its generated file. These actions ask for confirmation inside the app.
 
 ## Moving to another computer
 

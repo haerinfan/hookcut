@@ -77,5 +77,7 @@ Final local run: **23 tests passed**, including real speech recognition. The sta
 - Verified a bookmark near the source end clamps to the video duration, and saved moments/presets survive a page reload.
 - Verified export search and status filtering, the empty-results state, and the resulting MP4 preview.
 - Inspected saved-moment and export layouts at 320px: no horizontal document overflow. No console warnings or errors observed during these checks.
+- The staged source and Git history passed Gitleaks with no leaks found. The publication check approved 34 tracked files.
+- Extracted the version 1.2 ZIP, checked archive integrity and private-file exclusions, and launched the fresh copy on a separate port. It loaded 30 starter hooks, three presets, and an empty moments list; the video engine was available. The test copy was then stopped.
 
 These checks cover short demo footage and ordinary local use. They do not establish perfect behavior for every codec, unusually large workspace, or interrupted disk write.
