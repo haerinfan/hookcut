@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { hookInput, clipInput, videoFilter, wrapHook, parseRange, filename, cleanText } from './lib/core.mjs';
+import { STARTER_PRESETS, presetInput, momentInput, batchInput } from './lib/workspace.mjs';
 import { Transcription } from './lib/transcription.mjs';
 import { captionAss } from './lib/caption-render.mjs';
 import { seedHooks } from './lib/seeds.mjs';
@@ -23,11 +24,13 @@ const dbPath = path.join(DATA,'library.json');
 let db;
 try { db = JSON.parse(await fs.readFile(dbPath,'utf8')); if (!Array.isArray(db.hooks)||!Array.isArray(db.videos)||!Array.isArray(db.jobs)) throw new Error('Invalid library data.'); }
 catch (e) { if(e.code !== 'ENOENT') { console.error('Library could not be opened. Your existing data has not been replaced.', e.message); process.exit(1); } db={hooks:seedHooks(),videos:[],jobs:[]}; }
+db.moments ||= []; db.presets ||= []; db.batches ||= [];
 let saveChain=Promise.resolve();
-function save() { const content=JSON.stringify(db,null,2); saveChain=saveChain.catch(()=>{}).then(async()=>{await fs.writeFile(dbPath+'.tmp',content);await fs.rename(dbPath+'.tmp',dbPath);}); return saveChain; }
+function save() { db.revision=(db.revision||0)+1; const content=JSON.stringify(db,null,2); saveChain=saveChain.catch(()=>{}).then(async()=>{await fs.writeFile(dbPath+'.tmp',content);await fs.rename(dbPath+'.tmp',dbPath);}); return saveChain; }
 for(const j of db.jobs) if(['running','queued'].includes(j.status)) {j.status='failed';j.error='The app stopped before this export finished. Use Retry to export again.';}
 await save();
 const processes = new Map();
+const activeJobs = new Set(), pendingSources = new Map();
 let running=false, stopping=false;
 function run(binary,args,options={}) { return new Promise((resolve,reject)=>{
   const child=spawn(binary,args,{windowsHide:true,...options});let out='',err='';
@@ -69,7 +72,7 @@ async function probe(file){
   return {duration,width:Math.round(rotated?stream.height:stream.width*aspect),height:Math.round(rotated?stream.width*aspect:stream.height),codec:stream.codec_name,hasAudio:data.streams.some(s=>s.codec_type==='audio')};
 }
 async function nextJob(){
-  if(running||stopping)return;const job=db.jobs.findLast(j=>j.status==='queued');if(!job)return;running=true;job.status='running';job.progress=0;
+  if(running||stopping)return;const job=db.jobs.findLast(j=>j.status==='queued');if(!job)return;running=true;activeJobs.add(job.id);job.status='running';job.progress=0;
   try {
     await save();const video=find(db.videos,job.videoId,'Source video');const folder=path.join(DATA,'exports',job.id);await fs.mkdir(folder,{recursive:true});
     await fs.writeFile(path.join(folder,'hook.txt'),wrapHook(job.hookText));
@@ -83,6 +86,7 @@ async function nextJob(){
     args.push('-vf',videoFilter(job,video),'-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-threads','2');
     if(job.mute)args.push('-an');else args.push('-c:a','aac','-b:a','160k');
     args.push('-movflags','+faststart','-progress','pipe:1','-nostats',output);
+    if(job.status==='cancelled'||stopping)throw new Error('Export cancelled before rendering.');
     await new Promise((resolve,reject)=>{
       const child=spawn(FFMPEG,args,{cwd:folder,windowsHide:true});processes.set(job.id,child);let err='',pending='';
       child.stdout.on('data',chunk=>{pending+=chunk;const lines=pending.split('\n');pending=lines.pop();for(const line of lines){const match=/^out_time_us=(\d+)/.exec(line);if(match)job.progress=Math.min(99,Math.round(Number(match[1])/1000000/(job.end-job.start)*100));}});
@@ -90,7 +94,21 @@ async function nextJob(){
     });
     if(job.status!=='cancelled'){job.status='done';job.progress=100;job.file=path.join(job.id,'clip.mp4');job.bytes=(await fs.stat(output)).size;job.completedAt=new Date().toISOString();}
   }catch(e){if(job.status!=='cancelled'){job.status='failed';job.error=engineReady?'The export could not finish. Check the source video and retry.':'FFmpeg is not installed or could not be started.';console.error('Export failed:',e.message);}}
-  finally{processes.delete(job.id);running=false;await save().catch(console.error);setImmediate(nextJob);}
+  finally{processes.delete(job.id);activeJobs.delete(job.id);running=false;await save().catch(console.error);setImmediate(nextJob);}
+}
+
+
+const submittingBatches = new Set();
+async function submitJobs(inputs,batch){
+  if(!engineReady)throw new Error('FFmpeg is unavailable.');
+  if(batch&&submittingBatches.has(batch.id))throw new Error('This batch is already being queued. Please wait.');
+  const pairs=inputs.map(data=>{const video=find(db.videos,data.videoId,'Video');const job={...clipInput(data,video),id:randomUUID(),videoId:video.id,sourceName:video.name,status:'queued',progress:0,createdAt:new Date().toISOString()};if(job.burnCaptions&&!captionBurnReady)throw new Error('This FFmpeg build does not support caption rendering.');if(data.savedMomentId)job.savedMomentId=data.savedMomentId;if(batch)job.batchId=batch.id;return {video,job};});
+  const ids=[...new Set(pairs.map(p=>p.video.id))];for(const id of ids)pendingSources.set(id,(pendingSources.get(id)||0)+1);if(batch)submittingBatches.add(batch.id);
+  try{
+    const cache=new Map();
+    for(const {video,job} of pairs)if((job.includeSubtitles||job.burnCaptions)&&video.subtitleCount){if(!cache.has(video.id))cache.set(video.id,JSON.parse(await fs.readFile(path.join(DATA,'videos',video.id+'.captions.json'),'utf8')));job.captions=trimCaptions(cache.get(video.id),job.start,job.end,job.subtitleOffset);job.subtitleCount=job.captions.length;}
+    const jobs=pairs.map(p=>p.job);db.jobs.unshift(...[...jobs].reverse());if(batch){db.batches.unshift({...batch,jobIds:jobs.map(j=>j.id)});db.batches.splice(50);}await save();setImmediate(nextJob);return jobs;
+  }finally{for(const id of ids){const count=pendingSources.get(id)-1;if(count)pendingSources.set(id,count);else pendingSources.delete(id);}if(batch)submittingBatches.delete(batch.id);}
 }
 
 const server=http.createServer(async(req,res)=>{
@@ -103,7 +121,8 @@ const server=http.createServer(async(req,res)=>{
     if(req.headers['sec-fetch-site']==='cross-site')return json(res,403,{error:'Cross-site requests are not allowed.'});
     const url=new URL(req.url,`http://${host}`),p=url.pathname;
     if(!['GET','HEAD'].includes(req.method)&&req.headers['x-hookcut']!=='1')return json(res,403,{error:'Missing local app request header.'});
-    if(p==='/api/state'&&req.method==='GET')return json(res,200,{app:'hookcut',version:'1.1.0',hooks:db.hooks,videos:db.videos.map(publicVideo),jobs:db.jobs.map(publicJob),engineReady,captionBurnReady,transcription:transcription.snapshot(),maxUpload:MAX_UPLOAD});
+    if(p==='/api/state'&&req.method==='GET')return json(res,200,{app:'hookcut',version:'1.2.0',revision:db.revision,moments:db.moments,presets:[...STARTER_PRESETS,...db.presets],hooks:db.hooks,videos:db.videos.map(publicVideo),jobs:db.jobs.map(publicJob),engineReady,captionBurnReady,transcription:transcription.snapshot(),maxUpload:MAX_UPLOAD});
+    if(p==='/api/activity'&&req.method==='GET')return json(res,200,{revision:db.revision,progress:db.jobs.filter(j=>j.status==='running').map(j=>({id:j.id,progress:j.progress})),transcription:transcription.snapshot()});
     if(p==='/api/shutdown'&&req.method==='POST'){json(res,200,{ok:true});stopping=true;transcription.stop();for(const child of processes.values())child.kill();server.close();setTimeout(()=>saveChain.finally(()=>process.exit(0)),500);return;}
     if(p==='/api/demo'&&req.method==='POST'){const existing=db.videos.find(v=>v.demo);if(existing)return json(res,200,publicVideo(existing));if(!engineReady)throw new Error('Install FFmpeg to use demo footage.');const id=randomUUID(),file=id+'.mp4',full=path.join(DATA,'videos',file);await fs.copyFile(path.join(ROOT,'samples','practice.mp4'),full);const info=await probe(full);const video={id,file,name:'Practice footage.mp4',demo:true,bytes:(await fs.stat(full)).size,...info,createdAt:new Date().toISOString()};db.videos.unshift(video);await save();return json(res,201,publicVideo(video));}
     if(p==='/api/hooks'&&req.method==='POST'){const hook={...hookInput(await body(req)),id:randomUUID(),uses:0,starter:false,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};db.hooks.unshift(hook);await save();return json(res,201,hook);}
@@ -132,10 +151,23 @@ const server=http.createServer(async(req,res)=>{
       if(req.method==='DELETE'){await fs.unlink(file).catch(e=>{if(e.code!=='ENOENT')throw e;});delete v.subtitleCount;delete v.subtitleName;v.subtitleRevision=randomUUID();await save();return json(res,200,{ok:true});}
     }
     const videoMatch=/^\/api\/videos\/([\w-]+)$/.exec(p);
-    if(videoMatch&&req.method==='DELETE'){const v=find(db.videos,videoMatch[1],'Video');if(transcription.busy(v.id))throw new Error('Cancel transcription before removing this source.');if(db.jobs.some(j=>j.videoId===v.id&&['queued','running'].includes(j.status)))throw new Error('Wait for exports to finish or cancel them before removing this source.');await fs.unlink(path.join(DATA,'videos',v.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});await fs.unlink(path.join(DATA,'videos',v.id+'.captions.json')).catch(e=>{if(e.code!=='ENOENT')throw e;});db.videos=db.videos.filter(x=>x.id!==v.id);await save();return json(res,200,{ok:true});}
-    if(p==='/api/jobs'&&req.method==='POST'){if(!engineReady)throw new Error('FFmpeg is unavailable.');const data=await body(req);const video=find(db.videos,data.videoId,'Video');const job={...clipInput(data,video),id:randomUUID(),videoId:video.id,sourceName:video.name,status:'queued',progress:0,createdAt:new Date().toISOString()};if(job.burnCaptions&&!captionBurnReady)throw new Error('This FFmpeg build does not support caption rendering.');if((job.includeSubtitles||job.burnCaptions)&&video.subtitleCount){const cues=JSON.parse(await fs.readFile(path.join(DATA,'videos',video.id+'.captions.json'),'utf8'));job.captions=trimCaptions(cues,job.start,job.end,job.subtitleOffset);job.subtitleCount=job.captions.length;}db.jobs.unshift(job);await save();setImmediate(nextJob);return json(res,201,publicJob(job));}
+    if(videoMatch&&req.method==='DELETE'){const v=find(db.videos,videoMatch[1],'Video');if(transcription.busy(v.id))throw new Error('Cancel transcription before removing this source.');if(pendingSources.has(v.id)||db.jobs.some(j=>j.videoId===v.id&&activeJobs.has(j.id)))throw new Error('Wait for processing to stop before removing this source.');if(db.jobs.some(j=>j.videoId===v.id&&['queued','running'].includes(j.status)))throw new Error('Wait for exports to finish or cancel them before removing this source.');await fs.unlink(path.join(DATA,'videos',v.file)).catch(e=>{if(e.code!=='ENOENT')throw e;});await fs.unlink(path.join(DATA,'videos',v.id+'.captions.json')).catch(e=>{if(e.code!=='ENOENT')throw e;});db.videos=db.videos.filter(x=>x.id!==v.id);db.moments=db.moments.filter(m=>m.videoId!==v.id);await save();return json(res,200,{ok:true});}
+    if(p==='/api/presets'&&req.method==='POST'){if(db.presets.length>=50)throw new Error('Keep up to 50 custom presets.');const preset={...presetInput(await body(req)),id:randomUUID(),createdAt:new Date().toISOString()};db.presets.push(preset);await save();return json(res,201,preset);}
+    const presetMatch=/^\/api\/presets\/([\w-]+)$/.exec(p);
+    if(presetMatch&&req.method==='DELETE'){find(db.presets,presetMatch[1],'Custom preset');db.presets=db.presets.filter(x=>x.id!==presetMatch[1]);await save();return json(res,200,{ok:true});}
+    if(p==='/api/moments'&&req.method==='POST'){const data=await body(req);const video=find(db.videos,data.videoId,'Source video');if(db.moments.filter(m=>m.videoId===video.id).length>=200)throw new Error('Keep up to 200 saved moments per source.');const moment={...momentInput(data,video),id:randomUUID(),videoId:video.id,createdAt:new Date().toISOString()};db.moments.push(moment);await save();return json(res,201,moment);}
+    const momentMatch=/^\/api\/moments\/([\w-]+)$/.exec(p);
+    if(momentMatch){const m=find(db.moments,momentMatch[1],'Saved moment');if(req.method==='DELETE'){db.moments=db.moments.filter(x=>x.id!==m.id);await save();return json(res,200,{ok:true});}if(req.method==='PUT'){const data=await body(req);const title=cleanText(data.title,100);if(!title)throw new Error('Give your saved moment a name.');m.title=title;m.notes=cleanText(data.notes,1000);await save();return json(res,200,m);}}
+    if(p==='/api/jobs/batch'&&req.method==='POST'){
+      const {momentIds,requestId}=batchInput(await body(req));const previous=db.batches.find(b=>b.id===requestId);
+      if(previous){if(JSON.stringify(previous.momentIds)!==JSON.stringify(momentIds))throw new Error('This request ID was used for a different selection.');const jobs=previous.jobIds.map(id=>db.jobs.find(j=>j.id===id));if(jobs.some(j=>!j))throw new Error('This batch was already queued; some of its exports have since been removed.');return json(res,200,{jobs:jobs.map(publicJob),reused:true});}
+      const moments=momentIds.map(id=>find(db.moments,id,'Saved moment'));
+      const jobs=await submitJobs(moments.map(m=>({...m,savedMomentId:m.id,batchId:requestId})),{id:requestId,momentIds});
+      return json(res,201,{jobs:jobs.map(publicJob),reused:false});
+    }
+    if(p==='/api/jobs'&&req.method==='POST'){const [job]=await submitJobs([await body(req)]);return json(res,201,publicJob(job));}
     const jobMatch=/^\/api\/jobs\/([\w-]+)(\/retry|\/cancel)?$/.exec(p);
-    if(jobMatch){const j=find(db.jobs,jobMatch[1],'Export');if(req.method==='POST'&&jobMatch[2]==='/cancel'){if(!['running','queued'].includes(j.status))throw new Error('This export is no longer waiting or running.');j.status='cancelled';processes.get(j.id)?.kill();await save();return json(res,200,publicJob(j));}if(req.method==='POST'&&jobMatch[2]==='/retry'){if(!['failed','cancelled'].includes(j.status))throw new Error('Only failed or cancelled exports can be retried.');find(db.videos,j.videoId,'Source video');if(processes.has(j.id))throw new Error('The export is still stopping. Try again in a moment.');j.status='queued';j.progress=0;delete j.error;await save();setImmediate(nextJob);return json(res,200,publicJob(j));}if(req.method==='DELETE'){if(['queued','running'].includes(j.status)||processes.has(j.id))throw new Error('Cancel this export and wait for it to stop before removing it.');await fs.rm(path.join(DATA,'exports',j.id),{recursive:true,force:true});db.jobs=db.jobs.filter(x=>x.id!==j.id);await save();return json(res,200,{ok:true});}}
+    if(jobMatch){const j=find(db.jobs,jobMatch[1],'Export');if(req.method==='POST'&&jobMatch[2]==='/cancel'){if(!['running','queued'].includes(j.status))throw new Error('This export is no longer waiting or running.');j.status='cancelled';processes.get(j.id)?.kill();await save();return json(res,200,publicJob(j));}if(req.method==='POST'&&jobMatch[2]==='/retry'){if(!['failed','cancelled'].includes(j.status))throw new Error('Only failed or cancelled exports can be retried.');find(db.videos,j.videoId,'Source video');if(activeJobs.has(j.id))throw new Error('The export is still stopping. Try again in a moment.');j.status='queued';j.progress=0;delete j.error;await save();setImmediate(nextJob);return json(res,200,publicJob(j));}if(req.method==='DELETE'){if(['queued','running'].includes(j.status)||activeJobs.has(j.id))throw new Error('Cancel this export and wait for it to stop before removing it.');await fs.rm(path.join(DATA,'exports',j.id),{recursive:true,force:true});db.jobs=db.jobs.filter(x=>x.id!==j.id);await save();return json(res,200,{ok:true});}}
     const media=/^\/media\/([\w-]+)$/.exec(p);if(media&&['GET','HEAD'].includes(req.method)){const v=find(db.videos,media[1],'Video');const mime={'.webm':'video/webm','.mov':'video/quicktime','.mkv':'video/x-matroska','.avi':'video/x-msvideo'}[path.extname(v.file)]||'video/mp4';return await serveFile(req,res,path.join(DATA,'videos',v.file),mime);}
     const subtitleOutput=/^\/exports\/([\w-]+)\/subtitles$/.exec(p);if(subtitleOutput&&['GET','HEAD'].includes(req.method)){const j=find(db.jobs,subtitleOutput[1],'Export');if(j.status!=='done'||!j.subtitleCount)throw new Error('This clip does not have exported subtitles.');return await serveFile(req,res,path.join(DATA,'exports',j.id,'captions.srt'),'application/x-subrip; charset=utf-8',filename(j.title)+'.srt');}
     const output=/^\/exports\/([\w-]+)$/.exec(p);if(output&&['GET','HEAD'].includes(req.method)){const j=find(db.jobs,output[1],'Export');if(j.status!=='done')throw new Error('This export is not ready.');return await serveFile(req,res,path.join(DATA,'exports',j.file),'video/mp4',url.searchParams.has('download')?filename(j.title)+'.mp4':undefined);}

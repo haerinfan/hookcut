@@ -65,3 +65,17 @@ The ZIP excludes runtime data, imported user videos, logs, and font files. It in
 The speech model stays local. The bundled speech demo is original synthetic narration, not private footage. The ordinary test run reports the optional speech test as skipped unless `HOOKCUT_TEST_MODEL` points to the verified model. CI uses the ordinary suite and does not download model files or upload user data.
 
 Final local run: **23 tests passed**, including real speech recognition. The staged publication set passed Gitleaks 8.30.1 with no leaks found. The 320px browser layout had no horizontal overflow and no console warnings or errors were observed.
+
+## Version 1.2 verification
+
+- **27 tests passed**, including the real local speech test. The ordinary CI suite runs 26 tests and skips the optional model-dependent test.
+- Verified preset allowlisting: saved presets exclude clip names, hook text, source IDs, notes, and source-specific timing.
+- Verified moment validation, updates, deletion, and persistence across a server restart; source removal also removes its saved moments.
+- Verified all-or-nothing batch validation, repeat-request deduplication, mismatched-request rejection, and actual MP4 output for both queued moments. Captions remain available after removing them from the source.
+- Checked activity responses omit the hook library and full job history. Export cancellation now guards the preparation phase as well as the encoder process; retries and source deletion wait for processing to stop.
+- In the browser, saved and applied a custom preset, saved two cuts with different framing, edited notes, searched moments, reloaded a cut's settings, and queued both cuts together. Both completed and appeared as ready exports.
+- Verified a bookmark near the source end clamps to the video duration, and saved moments/presets survive a page reload.
+- Verified export search and status filtering, the empty-results state, and the resulting MP4 preview.
+- Inspected saved-moment and export layouts at 320px: no horizontal document overflow. No console warnings or errors observed during these checks.
+
+These checks cover short demo footage and ordinary local use. They do not establish perfect behavior for every codec, unusually large workspace, or interrupted disk write.

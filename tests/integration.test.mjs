@@ -51,6 +51,29 @@ test('end-to-end local workflow: hooks, uploads, real exports, persistence, and 
   const j=(await request('/api/jobs','POST',{videoId:video.id,title:'Caption snapshot',start:1,end:4,format:'original',includeSubtitles:true,burnCaptions:true,subtitleOffset:.5})).data;assert.equal(j.subtitleCount,2);
   await request('/api/videos/'+video.id+'/subtitles','DELETE');const job=await waitJob(j.id);assert.equal(job.status,'done');const r=await fetch(base+'/exports/'+j.id+'/subtitles');assert.equal(r.status,200);const result=await r.text();assert.match(result,/00:00:00,000 --> 00:00:01,500/);assert.match(result,/00:00:02,000 --> 00:00:03,000/);assert.match(result,/Second cue/);await request('/api/jobs/'+j.id,'DELETE');
  });
+ await t.test('saved moments, reusable presets, atomic batches, retries, and persistence',async()=>{
+  const settings={videoId:video.id,title:'Saved opening',start:0,end:1,format:'original',quality:'720',includeSubtitles:true,notes:'A useful opening'};
+  const p=await request('/api/presets','POST',{...settings,name:'My square preset',format:'square'});assert.equal(p.status,201);assert.equal(p.data.videoId,undefined);assert.equal(p.data.title,undefined);
+  assert.equal((await request('/api/presets/starter-vertical','DELETE')).status,404);
+  const one=await request('/api/moments','POST',settings),two=await request('/api/moments','POST',{...settings,title:'Second moment',start:2,end:3});assert.equal(one.status,201);assert.equal(two.status,201);
+  assert.equal((await request('/api/moments','POST',{...settings,end:99})).status,400);
+  assert.equal((await request('/api/moments/'+one.data.id,'PUT',{title:'Updated opening',notes:'Keep the payoff'})).data.title,'Updated opening');
+  await stop();await start();const restored=(await request('/api/state')).data;assert.equal(restored.moments.length,2);assert.equal(restored.presets.find(x=>x.id===p.data.id).format,'square');
+  const before=restored.jobs.length,requestId=crypto.randomUUID(),momentIds=[one.data.id,two.data.id];
+  assert.equal((await request('/api/jobs/batch','POST',{requestId,momentIds:[one.data.id,'missing']})).status,404);
+  assert.equal((await request('/api/state')).data.jobs.length,before);
+  await request('/api/videos/'+video.id+'/subtitles','POST',{name:'batch.srt',text:'1\n00:00:00,000 --> 00:00:04,000\nBatch caption\n'});
+  const batch=await request('/api/jobs/batch','POST',{requestId,momentIds});assert.equal(batch.status,201);assert.equal(batch.data.jobs.length,2);assert.equal(batch.data.jobs[0].title,'Updated opening');assert.equal(batch.data.jobs[0].subtitleCount,1);
+  const again=await request('/api/jobs/batch','POST',{requestId,momentIds});assert.equal(again.data.reused,true);assert.deepEqual(again.data.jobs.map(j=>j.id),batch.data.jobs.map(j=>j.id));assert.equal((await request('/api/state')).data.jobs.length,before+2);
+  assert.equal((await request('/api/jobs/batch','POST',{requestId,momentIds:[two.data.id]})).status,400);
+  await request('/api/videos/'+video.id+'/subtitles','DELETE');
+  for(const j of batch.data.jobs){assert.equal((await waitJob(j.id)).status,'done');assert.match(await (await fetch(base+'/exports/'+j.id+'/subtitles')).text(),/Batch caption/);}
+  const activity=await request('/api/activity');assert.equal(typeof activity.data.revision,'number');assert.equal(activity.data.hooks,undefined);assert.equal(activity.data.jobs,undefined);assert.ok(JSON.stringify(activity.data).length<JSON.stringify((await request('/api/state')).data).length/2);
+  for(const j of batch.data.jobs)await request('/api/jobs/'+j.id,'DELETE');
+  assert.equal((await request('/api/jobs/batch','POST',{requestId,momentIds})).status,400);
+  await request('/api/moments/'+two.data.id,'DELETE');assert.equal((await request('/api/state')).data.moments.length,1);
+  await request('/api/presets/'+p.data.id,'DELETE');assert.equal((await request('/api/state')).data.presets.length,3);
+ });
  await t.test('real vertical, square, and original exports with audio and text overlay',async()=>{
   for(const [format,fit,mute,burnHook,expected] of [['vertical','cover',false,true,[720,1280]],['square','contain',true,false,[720,720]],['original','cover',false,false,[640,360]]]){
    const queued=await request('/api/jobs','POST',{videoId:video.id,title:'Test '+format,start:1,end:3.5,format,fit,position:25,quality:'720',hookText:"A real hook: 100% focus, 'one' moment.",burnHook,mute});assert.equal(queued.status,201);
@@ -82,7 +105,7 @@ test('end-to-end local workflow: hooks, uploads, real exports, persistence, and 
  });
  await t.test('data survives a server restart and source removal preserves finished clips',async()=>{
   await stop();await start();const saved=(await request('/api/state')).data;assert.equal(saved.hooks.length,31);assert.equal(saved.jobs.filter(j=>j.status==='done').length,3);assert.equal(saved.videos.length,1);
-  assert.equal((await request('/api/videos/'+video.id,'DELETE')).status,200);assert.equal((await fetch(base+completed[0].url)).status,200);
+  assert.equal((await request('/api/videos/'+video.id,'DELETE')).status,200);assert.equal((await fetch(base+completed[0].url)).status,200);assert.equal((await request('/api/state')).data.moments.length,0);
   assert.equal((await request('/api/jobs/'+completed[0].id,'DELETE')).status,200);assert.equal((await fetch(base+completed[0].url)).status,404);
  });
  console.log('Verified artifacts:',temp);

@@ -9,6 +9,9 @@ A local hook library and clip preparation studio. Built for collecting openings,
 - **Transcript to clip:** search phrases, preview lines, select a passage, and use its timestamps as your cut.
 - **Captioned exports:** trim, reframe, add an opening hook, and burn captions directly into an H.264 MP4.
 - **Repeatable workflow:** saved drafts, an export queue, cancellation, retries, and reusable clip settings.
+- **Saved moments:** keep named cuts and notes per source, search them, and queue up to 20 together.
+- **Export presets:** three starter presets and your own reusable framing, audio, and caption settings.
+- **Find finished clips:** search titles, hook text, and source names; filter by status.
 
 <details>
 <summary>See an actual captioned export from the included practice footage</summary>
@@ -35,6 +38,18 @@ Install Node.js 22 or newer and FFmpeg with FFprobe on your PATH. There are **no
 5. Edit the attached hook. Optionally enable **Show hook in first 3 seconds**. Keep overlays concise; up to five wrapped lines are rendered.
 6. Choose 720p or 1080p and click **Add to export queue**. You can prepare the next cut while the first one renders.
 7. Open **Exports**, preview the result, and download the MP4. The attached hook can also be downloaded as a text file. **Edit a copy** restores the cut settings in the studio so you can make another version without changing the finished export.
+
+## Save moments and export a batch
+
+1. In **Clip settings**, choose an **Export preset** and click **Apply**, or configure the settings yourself. **Save settings** creates a custom preset. Applying a preset keeps your clip name, timing, hook text, and caption offset unchanged.
+2. In **Keep the good moments**, click **Save selection** and add a name and optional notes. **Save next 15 seconds** bookmarks from the playhead, stopping at the end of the video.
+3. Keep watching and save more selections. Each moment stores its own timestamps, framing, hook, audio, and caption options. **Load cut** restores it into the studio; **Edit details** changes its name and notes. To change a saved cut's timing, load it and save a new selection.
+4. Select up to **20 moments**, then click **Queue selected**. The queue processes them in timeline order, one at a time. Captions are snapshotted from the source when queued. A retry of the same batch request reuses its exports; the most recent 50 request identifiers are retained.
+5. In **Exports**, search by clip name, hook text, or source name and filter by status. **Show more clips** displays another 24 matching results.
+
+You can keep up to 200 moments per source and 50 custom presets. Saved moments and presets persist locally in `.data`, alongside the library. Removing a source removes its moments; completed exports remain. Hook-library JSON backups contain hooks only. To back up the whole workspace, stop Hookcut and copy its `.data` folder privately.
+
+The interface polls a small activity response while visible, fetches the full workspace only when its revision changes, and updates progress bars without rebuilding every card. Hidden tabs pause polling and refresh when visible again.
 
 ## Hook library
 
